@@ -2,7 +2,6 @@ package cbpfc
 
 import (
 	"fmt"
-	"math"
 
 	"github.com/cilium/ebpf/asm"
 	"github.com/pkg/errors"
@@ -33,6 +32,24 @@ var sizeToEBPF = map[int]asm.Size{
 	4: asm.Word,
 }
 
+type ContextType int
+
+const (
+	SkbContext	ContextType = iota
+	XdpContext
+)
+
+const (
+	R0Offset int = - 4 * 16 - 8 * (iota + 1)
+	R1Offset
+	R2Offset
+	R3Offset
+	R4Offset
+	R5Offset
+	R6Offset
+	DataOffset
+)
+
 // EBPFOpts control how a cBPF filter is converted to eBPF
 type EBPFOpts struct {
 	// PacketStart is a register holding a pointer to the start of the packet.
@@ -41,6 +58,12 @@ type EBPFOpts struct {
 	// PacketEnd is a register holding a pointer to the end of the packet.
 	// Not modified.
 	PacketEnd asm.Register
+	// Context register
+	Context asm.Register
+
+	// Context type
+	CtxType ContextType
+
 	// Register to output the filter return value in.
 	Result asm.Register
 
@@ -198,26 +221,160 @@ func insnToEBPF(insn instruction, blk *block, opts ebpfOpts) (asm.Instructions, 
 
 	case bpf.LoadAbsolute:
 		return packetLoad(opts, opts.PacketStart, i.Off, i.Size, func(src asm.Register, offset int16, size asm.Size) asm.Instructions {
+			var ins asm.Instructions = asm.Instructions {
+				// save registers
+				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R0Offset), asm.R0, asm.DWord),
+				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R1Offset), asm.R1, asm.DWord),
+				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R2Offset), asm.R2, asm.DWord),
+				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R3Offset), asm.R3, asm.DWord),
+				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R4Offset), asm.R4, asm.DWord),
+				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R5Offset), asm.R5, asm.DWord),
+				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R6Offset), asm.R6, asm.DWord),
+			}
+
+			ins = append(ins,
+				asm.Mov.Reg(asm.R1, opts.Context),
+				asm.Mov.Reg(asm.R2, src),
+				asm.Mov.Reg(asm.R3, asm.R10),
+				asm.Sub.Imm(asm.R3, int32(-opts.StackOffset)),
+				asm.Add.Imm(asm.R3, int32(DataOffset)),
+				asm.Mov.Imm(asm.R4, int32(size.Sizeof())),
+			)
+
+			if opts.CtxType == SkbContext {
+				ins = append(ins, 
+					asm.FnSkbLoadBytes.Call(),
+				)
+			} else if opts.CtxType == XdpContext {
+				ins = append(ins, 
+					asm.FnXdpLoadBytes.Call(),
+				)
+			}
+
+			ins = append(ins,
+				// restore registers
+				asm.LoadMem(asm.R1, asm.R10, int16(-opts.StackOffset + R1Offset), asm.DWord),
+				asm.LoadMem(asm.R2, asm.R10, int16(-opts.StackOffset + R2Offset), asm.DWord),
+				asm.LoadMem(asm.R3, asm.R10, int16(-opts.StackOffset + R3Offset), asm.DWord),
+				asm.LoadMem(asm.R4, asm.R10, int16(-opts.StackOffset + R4Offset), asm.DWord),
+				asm.LoadMem(asm.R5, asm.R10, int16(-opts.StackOffset + R5Offset), asm.DWord),
+				asm.LoadMem(asm.R6, asm.R10, int16(-opts.StackOffset + R6Offset), asm.DWord),
+				asm.JNE.Imm(asm.R0, 0, opts.label(noMatchLabel)),
+
+				// load data into register
+				asm.LoadMem(asm.R0, asm.R10, int16(-opts.StackOffset + R0Offset), asm.DWord),
+				asm.LoadMem(opts.regA, asm.R10, int16(-opts.StackOffset + DataOffset), size),
+			)
+
 			return appendNtoh(opts.regA, size,
-				asm.LoadMem(opts.regA, src, offset, size),
+				ins...,
 			)
 		})
 
 	case bpf.LoadIndirect:
 		// last packet guard set opts.regIndirect to packetstart + x
 		return packetLoad(opts, opts.regIndirect, i.Off, i.Size, func(src asm.Register, offset int16, size asm.Size) asm.Instructions {
+			var ins asm.Instructions = asm.Instructions {
+				// save registers
+				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R0Offset), asm.R0, asm.DWord),
+				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R1Offset), asm.R1, asm.DWord),
+				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R2Offset), asm.R2, asm.DWord),
+				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R3Offset), asm.R3, asm.DWord),
+				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R4Offset), asm.R4, asm.DWord),
+				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R5Offset), asm.R5, asm.DWord),
+				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R6Offset), asm.R6, asm.DWord),
+			}
+
+			ins = append(ins,
+				asm.Mov.Reg(asm.R1, opts.Context),
+				asm.Mov.Reg(asm.R2, src),
+				asm.Mov.Reg(asm.R3, asm.R10),
+				asm.Sub.Imm(asm.R3, int32(-opts.StackOffset)),
+				asm.Add.Imm(asm.R3, int32(DataOffset)),
+				asm.Mov.Imm(asm.R4, int32(size.Sizeof())),
+			)
+
+			if opts.CtxType == SkbContext {
+				ins = append(ins, 
+					asm.FnSkbLoadBytes.Call(),
+				)
+			} else if opts.CtxType == XdpContext {
+				ins = append(ins, 
+					asm.FnXdpLoadBytes.Call(),
+				)
+			}
+
+			ins = append(ins,
+				// restore registers
+				asm.LoadMem(asm.R1, asm.R10, int16(-opts.StackOffset + R1Offset), asm.DWord),
+				asm.LoadMem(asm.R2, asm.R10, int16(-opts.StackOffset + R2Offset), asm.DWord),
+				asm.LoadMem(asm.R3, asm.R10, int16(-opts.StackOffset + R3Offset), asm.DWord),
+				asm.LoadMem(asm.R4, asm.R10, int16(-opts.StackOffset + R4Offset), asm.DWord),
+				asm.LoadMem(asm.R5, asm.R10, int16(-opts.StackOffset + R5Offset), asm.DWord),
+				asm.LoadMem(asm.R6, asm.R10, int16(-opts.StackOffset + R6Offset), asm.DWord),
+				asm.JNE.Imm(asm.R0, 0, opts.label(noMatchLabel)),
+
+				// load data into register
+				asm.LoadMem(asm.R0, asm.R10, int16(-opts.StackOffset + R0Offset), asm.DWord),
+				asm.LoadMem(opts.regA, asm.R10, int16(-opts.StackOffset + DataOffset), size),
+			)
+
 			return appendNtoh(opts.regA, size,
-				asm.LoadMem(opts.regA, src, offset, size),
+				ins...,
 			)
 		})
 
 	case bpf.LoadMemShift:
 		return packetLoad(opts, opts.PacketStart, i.Off, 1, func(src asm.Register, offset int16, size asm.Size) asm.Instructions {
-			return []asm.Instruction{
-				asm.LoadMem(opts.regX, src, offset, size),
+			var ins asm.Instructions = asm.Instructions {
+				// save registers
+				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R0Offset), asm.R0, asm.DWord),
+				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R1Offset), asm.R1, asm.DWord),
+				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R2Offset), asm.R2, asm.DWord),
+				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R3Offset), asm.R3, asm.DWord),
+				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R4Offset), asm.R4, asm.DWord),
+				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R5Offset), asm.R5, asm.DWord),
+				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R6Offset), asm.R6, asm.DWord),
+			}
+
+			ins = append(ins,
+				asm.Mov.Reg(asm.R1, opts.Context),
+				asm.Mov.Reg(asm.R2, src),
+				asm.Mov.Reg(asm.R3, asm.R10),
+				asm.Sub.Imm(asm.R3, int32(-opts.StackOffset)),
+				asm.Add.Imm(asm.R3, int32(DataOffset)),
+				asm.Mov.Imm(asm.R4, int32(size.Sizeof())),
+			)
+
+			if opts.CtxType == SkbContext {
+				ins = append(ins, 
+					asm.FnSkbLoadBytes.Call(),
+				)
+			} else if opts.CtxType == XdpContext {
+				ins = append(ins, 
+					asm.FnXdpLoadBytes.Call(),
+				)
+			}
+
+			ins = append(ins,
+				// restore registers
+				asm.LoadMem(asm.R1, asm.R10, int16(-opts.StackOffset + R1Offset), asm.DWord),
+				asm.LoadMem(asm.R2, asm.R10, int16(-opts.StackOffset + R2Offset), asm.DWord),
+				asm.LoadMem(asm.R3, asm.R10, int16(-opts.StackOffset + R3Offset), asm.DWord),
+				asm.LoadMem(asm.R4, asm.R10, int16(-opts.StackOffset + R4Offset), asm.DWord),
+				asm.LoadMem(asm.R5, asm.R10, int16(-opts.StackOffset + R5Offset), asm.DWord),
+				asm.LoadMem(asm.R6, asm.R10, int16(-opts.StackOffset + R6Offset), asm.DWord),
+				asm.JNE.Imm(asm.R0, 0, opts.label(noMatchLabel)),
+
+				// load data into register
+				asm.LoadMem(asm.R0, asm.R10, int16(-opts.StackOffset + R0Offset), asm.DWord),
+				asm.LoadMem(opts.regX, asm.R10, int16(-opts.StackOffset + DataOffset), size),
+			)
+
+			return append(ins,
 				asm.And.Imm32(opts.regX, 0xF), // clear upper 4 bits
 				asm.LSh.Imm32(opts.regX, 2),   // 32bit words to bytes
-			}
+			)
 		})
 
 	case bpf.StoreScratch:
@@ -314,7 +471,13 @@ func insnToEBPF(insn instruction, blk *block, opts ebpfOpts) (asm.Instructions, 
 type packetRead func(src asm.Register, offset int16, size asm.Size) asm.Instructions
 
 func packetLoad(opts ebpfOpts, src asm.Register, offset uint32, size int, makeRead packetRead) (asm.Instructions, error) {
+	// nasty hack, PacketSatrt is 0, PacketEnd id pktLen, regTmp actually store the offset
+	return append(asm.Instructions {
+		asm.Mov.Reg(opts.regTmp, src),
+		asm.Add.Imm(opts.regTmp, int32(offset)),
+	}, makeRead(opts.regTmp, 0, sizeToEBPF[size])...), nil
 	// cBPF supports 32 bit signed offsets, but eBPF only 16 bit natively.
+	/*
 	if int32(offset) > math.MaxInt16 || int32(offset) < math.MinInt16 {
 		return append(asm.Instructions{
 			asm.Mov.Reg(opts.regTmp, src),
@@ -324,6 +487,7 @@ func packetLoad(opts ebpfOpts, src asm.Register, offset uint32, size int, makeRe
 	}
 
 	return makeRead(src, int16(offset), sizeToEBPF[size]), nil
+	*/
 }
 
 func appendNtoh(reg asm.Register, size asm.Size, insns ...asm.Instruction) asm.Instructions {
