@@ -1,4 +1,4 @@
-module github.com/cloudflare/cbpfc
+module github.com/yyyeerbo/cbpfc
 
 require (
 	github.com/cilium/ebpf v0.11.0
