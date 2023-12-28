@@ -276,6 +276,7 @@ func insnToEBPF(insn instruction, blk *block, opts ebpfOpts) (asm.Instructions, 
 		return packetLoad(opts, opts.regIndirect, i.Off, i.Size, func(src asm.Register, offset int16, size asm.Size) asm.Instructions {
 			var ins asm.Instructions = asm.Instructions {
 				// save registers
+				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R4Offset), asm.R4, asm.DWord),
 				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R0Offset), asm.R0, asm.DWord),
 				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R1Offset), asm.R1, asm.DWord),
 				asm.StoreMem(asm.R10, int16(-opts.StackOffset + R2Offset), asm.R2, asm.DWord),
